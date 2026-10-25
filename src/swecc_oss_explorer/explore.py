@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from .discovery import discover, repo_full_names
-from .github import GitHubClient
+from .github import GitHubClient, GitHubError
 from .query import build_issue_query
 
 QUERY_CHAR_BUDGET = 250  # GitHub hard-caps at 256; leave headroom
@@ -62,8 +62,13 @@ def search_issues_scoped(
     sort: str = "created",
     per_page: int = 50,
     on_progress: Callable[[int, int], None] | None = None,
+    on_partial: Callable[[int, int, GitHubError], None] | None = None,
 ) -> list[dict]:
-    """Run the right search strategy for a scope and return merged, sorted issues."""
+    """Return merged, sorted issues, retaining completed batches on a later API error.
+
+    ``on_partial`` receives the completed batch count, total batches, and error.
+    Discovery, single-query, and first-batch errors still propagate.
+    """
     if repos:
         chunks = _chunk_for_query(repos, labels, language, text, created_since)
     elif scope == "top":
@@ -93,7 +98,15 @@ def search_issues_scoped(
             text=text,
             created_since=created_since,
         )
-        for issue in client.search_issues(query, sort=sort, per_page=per_page, max_pages=1):
+        try:
+            batch = client.search_issues(query, sort=sort, per_page=per_page, max_pages=1)
+        except GitHubError as err:
+            if idx == 1:
+                raise
+            if on_partial:
+                on_partial(idx - 1, len(chunks), err)
+            break
+        for issue in batch:
             if issue.get("id") not in seen:
                 seen.add(issue["id"])
                 merged.append(issue)

@@ -3,7 +3,7 @@
 import pytest
 
 from swecc_oss_explorer.explore import chunk_repos, search_issues_scoped
-from swecc_oss_explorer.github import GitHubError
+from swecc_oss_explorer.github import GitHubError, RateLimitError
 from tests.test_github import FakeResponse, make_client
 
 
@@ -108,3 +108,45 @@ class TestSearchIssuesScoped:
         client = make_client([("/search/issues", FakeResponse(422, {"message": "bad"}))])
         with pytest.raises(GitHubError):
             search_issues_scoped(client, scope="all")
+
+    @pytest.mark.parametrize("status, text, error_type", [
+        (403, "API rate limit exceeded", RateLimitError),
+        (500, "server unavailable", GitHubError),
+    ])
+    def test_later_batch_failure_preserves_sorted_deduplicated_results(
+        self, status, text, error_type
+    ):
+        repos = [f"org/{'r' * 130}{i}" for i in range(4)]
+        client = make_client([
+            ("/search/issues", FakeResponse(200, {"items": [issue(1)]})),
+            ("/search/issues", FakeResponse(200, {"items": [issue(1), issue(2)]})),
+            ("/search/issues", FakeResponse(status, text=text)),
+        ])
+        partial = []
+        result = search_issues_scoped(
+            client, repos=repos,
+            on_partial=lambda done, total, err: partial.append((done, total, err)),
+        )
+        assert [item["id"] for item in result] == [2, 1]
+        assert len(client.session.calls) == 3  # do not keep querying after failure
+        assert len(partial) == 1
+        assert partial[0][:2] == (2, 4)
+        assert isinstance(partial[0][2], error_type)
+
+    def test_first_batch_failure_still_raises(self):
+        client = make_client([("/search/issues", FakeResponse(500))])
+        with pytest.raises(GitHubError):
+            search_issues_scoped(client, repos=["org/repo"])
+
+    def test_successful_empty_batch_is_still_partial_progress(self):
+        client = make_client([
+            ("/search/issues", FakeResponse(200, self.EMPTY)),
+            ("/search/issues", FakeResponse(429, text="rate limit exceeded")),
+        ])
+        partial = []
+        result = search_issues_scoped(
+            client, repos=[f"org/{'r' * 130}{i}" for i in range(2)],
+            on_partial=lambda done, total, err: partial.append((done, total)),
+        )
+        assert result == []
+        assert partial == [(1, 2)]

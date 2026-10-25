@@ -23,6 +23,7 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+error_console = Console(stderr=True)
 
 
 def _age(iso: str) -> str:
@@ -96,8 +97,9 @@ def explore(
     created_since = days_ago_iso(age_days) if age_days is not None else None
 
     client = GitHubClient()
+    partial = []
+    status = console.status("[bold blue]Searching GitHub…")
     try:
-        status = console.status("[bold blue]Searching GitHub…")
         status.start()
         issues = search_issues_scoped(
             client,
@@ -112,19 +114,32 @@ def explore(
             on_progress=lambda done, total: status.update(
                 status=f"[bold blue]Searching GitHub… repo batch {done}/{total}"
             ),
+            on_partial=lambda done, total, err: partial.append((done, total, err)),
         )
-        status.stop()
         issues = issues[:limit]
     except (RateLimitError, GitHubError) as err:
         console.print(f"[bold red]Error:[/bold red] {err}")
         raise typer.Exit(1) from err
+    finally:
+        status.stop()
+
+    if partial:
+        done, total, err = partial[0]
+        error_console.print(
+            f"Warning: showing partial results; {done}/{total} repo batches completed. {err}",
+            markup=False,
+        )
 
     if json_output:
         console.print_json(json.dumps(issues))
         return
 
     if not issues:
-        console.print("[yellow]No issues found for these filters.[/yellow]")
+        message = (
+            "No issues found in the completed batches."
+            if partial else "No issues found for these filters."
+        )
+        console.print(f"[yellow]{message}[/yellow]")
         return
 
     table = Table(title=f"{len(issues)} open issues", header_style="bold magenta")
